@@ -1,0 +1,341 @@
+# ---------------------------------------------------------------------------
+# Household configuration.
+#
+# Everything site-specific lives in this file. To apply the pipeline to a
+# different home, copy this file and edit it -- no code changes required.
+#
+# The values below describe the study household reported in Heydari &
+# Stillwell. Flow rates are in gallons per minute (gpm); all durations are in
+# seconds unless the key name says otherwise.
+# ---------------------------------------------------------------------------
+
+meter:
+  # Sampling period of the raw trace, in seconds.
+  sample_period_s: 1
+
+  # Flow readings below this magnitude are treated as zero. The raw signal
+  # oscillates around zero when no fixture is running (including small
+  # negative values), so a deadband is required before any thresholding.
+  #
+  # NOTE: set from the meter noise characterisation in prior work with this
+  # instrument. Confirm the published value before release.
+  noise_floor_gpm: 0.05
+
+  # Optional fixed timezone correction. Some data-acquisition setups log in a
+  # timezone other than the household's local time. When shift_hours is
+  # non-zero the trace is shifted and then re-split by local calendar day.
+  #
+  # Leave at 0 unless you know your logger has this problem.
+  timezone:
+    shift_hours: 0            # study household used -1 (Eastern -> Central)
+    resplit_by_local_day: true
+
+  # Columns in the raw CSV. The study meter writes headerless rows in
+  # interleaved pairs: one row carries only the cumulative total, the next
+  # carries the instantaneous channels. See io.read_trace for details.
+  raw_format:
+    layout: paired_rows       # 'paired_rows' | 'flat'
+    has_header: false
+    timestamp_format: "%Y-%m-%d %I:%M:%S %p"
+    columns: [timestamp, temperature_f, pressure, flow_gpm, cumulative_gal]
+    flow_column: flow_gpm
+
+# ---------------------------------------------------------------------------
+# Event segmentation defaults.
+#
+# Per-fixture overrides live in the `fixtures` block below; anything omitted
+# there falls back to these values. Thresholds expressed as `*_frac` are
+# fractions of the fixture's fitted steady-state rate (r_f), so they transfer
+# to homes with different fixtures.
+# ---------------------------------------------------------------------------
+segmentation:
+  on_threshold_frac: 0.50     # rising edge: flow > frac * r_f
+  off_threshold_frac: 0.25    # falling edge: hysteresis prevents fragmenting
+  min_duration_s: 5
+  bridge_gap_s: 10            # merge activations separated by less than this
+
+  # Candidate-event detection on the *aggregate* trace, used by rates.py and
+  # labels.py before any per-fixture rate is known.
+  aggregate:
+    on_threshold_gpm: 0.15
+    off_threshold_gpm: 0.08
+    min_duration_s: 4
+    bridge_gap_s: 3
+
+# ---------------------------------------------------------------------------
+# Diary-to-trace matching.
+#
+# Water diaries are recorded by hand at minute resolution, so a diary
+# timestamp is a window rather than an instant. Short events are frequently
+# logged with identical start and end times, meaning the diary carries no
+# usable duration for them. Event boundaries therefore come from the trace and
+# only the fixture identity comes from the diary.
+# ---------------------------------------------------------------------------
+matching:
+  start_tolerance_s: 180      # how far a trace event may sit from its diary row
+  duration_tolerance_frac: 0.5
+  # Diary rows whose start == end carry no duration information; match on
+  # start time alone.
+  treat_equal_times_as_unknown_duration: true
+
+# ---------------------------------------------------------------------------
+# Windowing and model input.
+# ---------------------------------------------------------------------------
+windows:
+  length_s: 60                # as reported; 120 and 300 are worth comparing
+  stride_s: 15
+  # Only windows containing at least one active fixture are retained for
+  # training, per Algorithm 1 in the paper's SI.
+  require_active_fixture: true
+  # Fraction of the window emitted per step at inference time. With
+  # stride_s / length_s the emitted slices tile the timeline exactly, so every
+  # second receives exactly one prediction.
+  emit: center                # 'center' for bidirectional, 'tail' for causal
+
+split:
+  # Splits are taken by calendar day, never by window: windows overlap by 75%
+  # at the default stride, so a random split would place near-duplicate
+  # windows on both sides and inflate every metric.
+  #
+  # Sizes are fractions of however many diary-covered days are actually
+  # discovered, not fixed counts -- diary coverage is usually intermittent
+  # within the stated collection window, and the number of usable days is a
+  # property of the data rather than something to assert here. Absolute
+  # minimums guarantee an evaluation set exists even for a short campaign.
+  mode: by_day
+  test_frac: 0.18
+  val_frac: 0.14
+  min_test_days: 3
+  min_val_days: 2
+  stratify_by: day_type          # 'day_type' | 'none'
+  # Windows straddling a split boundary are discarded.
+  boundary_guard_s: 300
+  seed: 20240606
+
+  # Fixtures with very few labelled events will have no test-set
+  # representation at all. That is reported rather than worked around:
+  # per-fixture metrics are meaningless without support, and resampling to
+  # manufacture test events would misrepresent what was actually validated.
+  min_test_events_warn: 3
+
+  # When the labelled period is short, a single held-out split gives a noisy
+  # point estimate. Enabling k-fold over days evaluates on every labelled day
+  # in turn and reports a spread instead.
+  kfold:
+    enabled: false
+    n_folds: 5
+
+# ---------------------------------------------------------------------------
+# Synthetic event augmentation.
+#
+# Sparse fixtures cannot be learned from a handful of labelled events, so the
+# training set is supplemented with synthetic activations built from real
+# recorded waveforms. Counts are derived from a policy rather than fixed per
+# fixture: the numbers reported for any one household describe that campaign,
+# not a target another household should inherit.
+#
+# Per-fixture `synthetic` values in the fixtures block, where present, are
+# treated as recorded outcomes for reference and are ignored unless
+# `policy: explicit` is selected below.
+# ---------------------------------------------------------------------------
+augmentation:
+  policy: balance_to_target       # 'balance_to_target' | 'explicit' | 'none'
+
+  # Bring each fixture up to roughly this many training events, capped so a
+  # rarely-used fixture is not represented almost entirely by synthesised
+  # data. With target 120 and cap 8.0, a fixture with 2 real events gets at
+  # most 16 synthetic ones -- enough to be learnable, not enough to imply
+  # more evidence than exists.
+  target_events_per_fixture: 120
+  max_synthetic_per_observed: 8.0
+
+  # Frequently-used fixtures are left close to their natural frequency, so
+  # the model still sees a realistic prior over which fixtures are common.
+  skip_if_observed_above: 300
+
+  # Share of synthetic windows built by superimposing two or three templates
+  # rather than placing one on an idle baseline. Concurrent use is the case
+  # the model most needs to handle and the case real labelled data covers
+  # worst, and superposition yields exactly-known component labels.
+  overlap_fraction: 0.5
+  max_concurrent: 3
+
+  # Variation applied when placing a template.
+  amplitude_jitter: 0.05          # +/- fraction of the fitted rate
+  duration_from: empirical        # draw durations from the observed distribution
+  preserve_transients: true       # resample the plateau only, splice real edges
+  add_baseline_noise: true
+
+  # Measured superposition factor: observed aggregate divided by the sum of
+  # solo rates during concurrent use. Values below 1 indicate pressure-driven
+  # loss when several fixtures run together. Fitted by rates.py when labelled
+  # overlapping events exist; the value here is the fallback.
+  superposition_factor: 1.0
+
+# ---------------------------------------------------------------------------
+# Fixtures.
+#
+# `code` is the internal identifier and the column name used throughout the
+# pipeline. `diary` gives the (page, symbol) pair used on the paper diary
+# sheets: each sheet is headed with a room, and the End-use column holds a
+# single letter scoped to that room.
+#
+# `rate_gpm` is a starting guess only -- rates.py fits the actual value from
+# non-overlapping labelled events and overwrites it. Leave `null` if unknown.
+#
+# `observed` / `synthetic` record the labelled event counts reported in Table
+# S2, and set the augmentation targets used by synth.py.
+# ---------------------------------------------------------------------------
+fixtures:
+  - code: Ad_S
+    label: "Shower #1"
+    category: shower
+    room: primary_bathroom
+    diary: {page: primary_bathroom, symbol: S}
+    rate_gpm: 2.26
+    observed: 55
+    synthetic: 45
+    segmentation: {min_duration_s: 120, bridge_gap_s: 45}
+
+  - code: Kid_S
+    label: "Shower #2"
+    category: shower
+    room: upstairs_bathroom
+    diary: {page: upstairs_bathroom, symbol: S}
+    rate_gpm: 2.44
+    observed: 35
+    synthetic: 60
+    segmentation: {min_duration_s: 120, bridge_gap_s: 45}
+
+  - code: Dwn_S
+    label: "Shower #3"
+    category: shower
+    room: downstairs_bathroom
+    diary: {page: downstairs_bathroom, symbol: S}
+    rate_gpm: 2.58
+    observed: 2
+    synthetic: 20
+    segmentation: {min_duration_s: 120, bridge_gap_s: 45}
+
+  - code: Ad_T
+    label: "Toilet #1"
+    category: toilet
+    room: primary_bathroom
+    diary: {page: primary_bathroom, symbol: T}
+    rate_gpm: 2.84
+    observed: 134
+    synthetic: 66
+    segmentation: {min_duration_s: 10, bridge_gap_s: 5}
+
+  - code: Kid_T
+    label: "Toilet #2"
+    category: toilet
+    room: upstairs_bathroom
+    diary: {page: upstairs_bathroom, symbol: T}
+    rate_gpm: 2.99
+    observed: 73
+    synthetic: 127
+    segmentation: {min_duration_s: 10, bridge_gap_s: 5}
+
+  - code: Dwn_T
+    label: "Toilet #3"
+    category: toilet
+    room: downstairs_bathroom
+    diary: {page: downstairs_bathroom, symbol: T}
+    rate_gpm: 1.24
+    observed: 94
+    synthetic: 106
+    segmentation: {min_duration_s: 10, bridge_gap_s: 5}
+
+  - code: Ad_F
+    label: "Faucet #1"
+    category: faucet
+    room: primary_bathroom
+    diary: {page: primary_bathroom, symbol: F}
+    rate_gpm: 1.41
+    observed: 103
+    synthetic: 20
+    segmentation: {min_duration_s: 4, bridge_gap_s: 3}
+
+  - code: Kid_F
+    label: "Faucet #2"
+    category: faucet
+    room: upstairs_bathroom
+    diary: {page: upstairs_bathroom, symbol: F}
+    rate_gpm: 0.90
+    observed: 98
+    synthetic: 22
+    segmentation: {min_duration_s: 4, bridge_gap_s: 3}
+
+  - code: Dwn_F
+    label: "Faucet #3"
+    category: faucet
+    room: downstairs_bathroom
+    diary: {page: downstairs_bathroom, symbol: F}
+    rate_gpm: 0.54
+    observed: 102
+    synthetic: 108
+    segmentation: {min_duration_s: 4, bridge_gap_s: 3}
+
+  - code: Kitch_F
+    label: "Faucet #4"
+    category: faucet
+    room: kitchen
+    diary: {page: kitchen, symbol: F}
+    rate_gpm: 1.20
+    observed: 563
+    synthetic: 37
+    segmentation: {min_duration_s: 4, bridge_gap_s: 3}
+
+  - code: Kitch_r
+    label: "Faucet #5"
+    category: faucet
+    room: kitchen
+    diary: {page: kitchen, symbol: R}
+    rate_gpm: 0.40
+    observed: 140
+    synthetic: 60
+    segmentation: {min_duration_s: 3, bridge_gap_s: 2}
+
+  - code: Bsmnt_F
+    label: "Faucet #6"
+    category: faucet
+    room: laundry
+    diary: {page: laundry, symbol: F}
+    rate_gpm: 1.55
+    observed: 6
+    synthetic: 24
+    segmentation: {min_duration_s: 4, bridge_gap_s: 3}
+
+  - code: Dish_W
+    label: "Dishwasher"
+    category: appliance
+    room: kitchen
+    diary: {page: kitchen, symbol: D}
+    rate_gpm: 1.24
+    observed: 24
+    synthetic: 31
+    # Dishwashers draw in several short fills separated by genuine multi-minute
+    # gaps. Without a wide bridge one cycle becomes half a dozen events.
+    segmentation: {min_duration_s: 20, bridge_gap_s: 420}
+
+  - code: Wash_M
+    label: "Washing Machine"
+    category: appliance
+    room: laundry
+    diary: {page: laundry, symbol: W}
+    rate_gpm: 2.99
+    observed: 29
+    synthetic: 26
+    segmentation: {min_duration_s: 20, bridge_gap_s: 300}
+
+# Fixtures present in the home but deliberately excluded from the model.
+# The primary bathroom has a bathtub; no use was recorded during the study
+# period, so it contributes no training signal and is dropped rather than
+# carried as an always-zero output.
+excluded_fixtures:
+  - code: Ad_B
+    label: "Bathtub"
+    room: primary_bathroom
+    diary: {page: primary_bathroom, symbol: B}
+    reason: "No use recorded during the study period."

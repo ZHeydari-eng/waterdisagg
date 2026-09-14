@@ -1,0 +1,23 @@
+# Data — never commit household traces or diaries
+data/
+*.csv
+*.parquet
+!config/*.csv
+outputs/
+runs/
+*.pt
+*.ckpt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
