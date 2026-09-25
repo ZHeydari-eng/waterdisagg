@@ -1,10 +1,8 @@
 # waterdisagg
 
-> **Status: in development.** The data handling, labelling, windowing, model,
-> inference and evaluation modules are complete and tested. The command-line
-> scripts and the behavioural analysis modules (`analysis/`) are still being
-> written, so the Quick Start below does not yet run end to end. The library
-> API works; see `tests/` for usage.
+> **Status: in development.** The full pipeline runs end to end via
+> `run_pipeline.py`. The behavioural analysis modules (`analysis/`) — stagnation
+> time, clustering, and leak statistics — are still being written.
 
 Non-intrusive disaggregation of residential water use from a single-point
 smart meter, and analysis of end-use behaviour through **stagnation time** —
@@ -54,16 +52,53 @@ a matching hand-style water diary, and per-second ground truth. This makes the
 whole pipeline runnable without access to any real household's data:
 
 ```bash
-python scripts/01_prepare.py --demo --outdir runs/demo
-python scripts/02_train.py   --run runs/demo
-python scripts/03_predict.py --run runs/demo
-python scripts/04_analyze.py --run runs/demo
+python run_pipeline.py --demo
 ```
 
 The simulator reproduces the properties that make real data awkward:
 instrument smoothing, a noisy non-zero idle baseline, dropped samples,
 minute-resolution diary entries with no recorded duration for short events,
 and concurrent fixture use.
+
+## Reading the method
+
+Two files present the method as a single readable sequence.
+
+`standalone.py` is self-contained: it imports only numpy, pandas and torch,
+and can be pasted into a notebook and run as-is. It includes a small
+household simulator, so it needs no data. This is the quickest way to see
+what the method does.
+
+```bash
+python standalone.py                    # simulated household
+python standalone.py --trace t.csv --labels l.csv
+```
+
+Being a condensation, it omits what the package handles for real data: meter
+files whose records span several rows, matching a hand-written diary to the
+trace, per-fixture event rules, and the full evaluation suite. Where the two
+differ, the package is authoritative.
+
+`run_pipeline.py` performs every step of the analysis in order, in a single
+annotated file. Each of its eight stages is preceded by an explanation of what
+is being done and why that choice was made, so the method can be read off the
+script without navigating the package. It calls the modules rather than
+reimplementing them, so what you read is what runs.
+
+```
+Stage 1   Load and condition the raw meter trace
+Stage 2   Build per-fixture labels from the water diary
+Stage 3   Fit each fixture's steady-state flow rate
+Stage 4   Partition by calendar day, then window
+Stage 5   Train the disaggregation model
+Stage 6   Predict across the continuous record
+Stage 7   Convert predictions into discrete events
+Stage 8   Evaluate against held-out days
+```
+
+A run writes the day partition used, fitted rates and their pairwise
+separability, fitted thresholds, training history, the predicted event table,
+per-fixture metrics, and a LaTeX performance table.
 
 ## Using your own data
 
@@ -92,7 +127,12 @@ pipeline to a different home. Fixture flow rates are fitted from your own
 labelled events rather than assumed.
 
 ```bash
-python scripts/01_prepare.py --config config/my_house.yaml \
+# If diary events have already been aligned to the trace per second:
+python run_pipeline.py --config config/my_house.yaml \
+    --trace data/trace/ --labels data/labels.csv --outdir runs/my_house
+
+# If labels must be built by matching a raw diary to the trace:
+python run_pipeline.py --config config/my_house.yaml \
     --trace data/trace/ --diary data/diary.csv --outdir runs/my_house
 ```
 
@@ -116,7 +156,8 @@ src/waterdisagg/
         stagnation.py        Stagnation time; counterfactual user assignment
         clustering.py        k-means over shower events
         leak.py              Median shift and distribution tests
-scripts/                     Four ordered entry points
+run_pipeline.py              The full analysis, calling the modules in order
+standalone.py                Self-contained version; no installation needed
 tests/                       Test suite
 ```
 
@@ -185,3 +226,4 @@ Sensus.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
